@@ -115,7 +115,7 @@ char PRN1_CHIP_CHUNK[CHIPS_PER_BIT / 8];
  * @param prn               input prn string of 0s and 1s
  * @param prn_chip_chunks   output 
  */
-void generate_chip_chunks(char prn[], int prn_chip_chunks[]) {
+void generate_chip_chunks(char prn[], char prn_chip_chunks[]) {
     int working = 0;
     for (int chip_index = 0; chip_index < CHIPS_PER_BIT; chip_index++) {
 
@@ -143,15 +143,15 @@ int INTERFERENCE_LOOKUP[1 << CHIPS_PER_CHIP_CHUNK];
  * @brief Populates the INTERFERENCE_LOOKUP array above.
  */
 void generate_interference_lookup() {
-    int num_interferences = 1 << CHIPS_PER_CHIP_CHUNK;
-    for (int num = 0; num < num_interferences; num++) {
-        int num_copy = num; // copy so that we don't mutate the thing over which we iterate 
-        int num_common = 0; // sum of constructive interferences
-        for(int _ = 0; _ < CHIPS_PER_CHIP_CHUNK; _++) {
-            num_copy = num_copy >> 1;
-            num_common += num_copy & 1;
+    int interference_lookup_length = 1 << CHIPS_PER_CHIP_CHUNK;
+    for (int index = 0; index < interference_lookup_length; index++) {
+        int num_copy = index; // copy so that we don't mutate the thing over which we iterate 
+        int set_bits_in_num = 0; // count of bits set in the 
+        while (num_copy) {
+            num_copy &= (num_copy - 1);
+            set_bits_in_num += 1;
         }
-        INTERFERENCE_LOOKUP[num] = num_common;
+        INTERFERENCE_LOOKUP[index] = set_bits_in_num;
     }
 }
 
