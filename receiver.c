@@ -27,6 +27,7 @@
 #include <arpa/inet.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <assert.h>
 
 // threads
 #include <pthread.h>
@@ -36,6 +37,11 @@
 
 // The number of bits in the pseudo random number representing a 1 and 0.
 #define CHIPS_PER_BIT 512
+
+/**
+ * The logical packet is the syncword + data points from a given sensor reading
+ * It is subdivided into many physical packets, which are transmitted consecutively.
+ */
 
 // The number of integers in the packet to be transmitted.
 #define DATA_BYTES_IN_LOGICAL_PACKET 10
@@ -95,60 +101,32 @@
 #define BITS_PER_PHYSICAL_PACKET 1
 
 /**
-Each bit is mapped to CHIPS_PER_BIT chips when being transmitted
-Each packet contains [BYTES_PER_PACKET] integers of 8 bits.
-Total size = 8 * BYTES_PER_PACKET * CHIPS_PER_BIT
-*/
-
+ * Each bit is mapped to CHIPS_PER_BIT chips when being transmitted
+ */
 
 //defined psuedo-random number for 0.
-char PRN0_STRING[CHIPS_PER_BIT] = "11111101001111100111011111010101001001011110111100101100011010"
-                      "010010101011101001001111001100010000000111100100111100010100000"
-                      "1110011011100011111011110111101000110111010000001111001000000110"
-                      "1111101111101011010111011011100100010001100011010011001011100101"
-                      "0011010110011011001110101100001101011010110101010000000010111010"
-                      "01101101010110010111101011001010010001111111110011110000010100001"
-                      "10011011101001101001100101101001100010111001010100111101000111101"
-                      "01100101100101110011000111011111101010100110001001101010001010100";
+char PRN0_CHIP_CHUNK[CHIPS_PER_BIT / CHIPS_PER_CHUNK] = {
+  0b00000001, 0b01011110, 0b11010100, 0b01100001, 0b00001011, 0b11110011, 0b00110001, 0b01011100,
+  0b01100110, 0b10010010, 0b01011011, 0b00101010, 0b11100000, 0b10100011, 0b00000000, 0b11100001,
+  0b10111011, 0b10011111, 0b00110001, 0b11001111, 0b11110111, 0b11000000, 0b10110010, 0b01110101,
+  0b10101010, 0b10100111, 0b10100101, 0b00010010, 0b00001111, 0b01011011, 0b00000010, 0b00111101,
+  0b01001110, 0b01100000, 0b10001110, 0b00010111, 0b00110100, 0b10000101, 0b01100001, 0b01000101,
+  0b00000110, 0b10100010, 0b00110110, 0b00101111, 0b10101001, 0b00011111, 0b11010111, 0b11111101,
+  0b10011101, 0b01001000, 0b00011001, 0b00011000, 0b10101111, 0b00110110, 0b10010011, 0b00000000,
+  0b00010000, 0b10000101, 0b00101000, 0b00011101, 0b01011100, 0b10101111, 0b01100100, 0b11011010
+};
 
 //defined psuedo-random number for 1.
-char PRN1_STRING[CHIPS_PER_BIT] = "00000001010111101101010001100001000010111111001100110001010111000110011"
-                      "01001001001011011001010101110000010100011000000001110000110111011100111"
-                      "11001100011100111111110111110000001011001001110101101010101010011110100"
-                      "10100010010000011110101101100000010001111010100111001100000100011100001"
-                      "011100110100100001010110000101000101000001101010001000110110001011111010"
-                      "100100011111110101111111110110011101010010000001100100011000101011110011"
-                      "011010010011000000000001000010000101001010000001110101011100101011110110"
-                      "010011011010";
-
-// prn0 chip sequences packaged into chip-chunks (chars of 8 chips)
-char PRN0_CHIP_CHUNK[CHIPS_PER_BIT / 8];
-
-// prn1 chip sequences packaged into chip-chunks (chars of 8 chips)
-char PRN1_CHIP_CHUNK[CHIPS_PER_BIT / 8];
-
-/**
- * @brief takes in a prn-string and converts it into a chunk array
- * 
- * @param prn               input prn string of 0s and 1s
- * @param prn_chip_chunks   output 
- */
-void generate_chip_chunks(char prn[], char prn_chip_chunks[]) {
-    int working = 0;
-    for (int chip_index = 0; chip_index < CHIPS_PER_BIT; chip_index++) {
-
-        switch(prn[chip_index]) {
-            case '0':
-                bit_funnel(0, &prn_chip_chunks, &working);
-                break;
-            case '1':
-                bit_funnel(1, &prn_chip_chunks, &working);
-                break;
-            default:
-                throw("poorly formatted prn");
-        }
-    }
-}
+char PRN1_CHIP_CHUNK[CHIPS_PER_BIT / CHIPS_PER_CHUNK] = {
+  0b11111101, 0b00111110, 0b01110111, 0b11010101, 0b00100101, 0b11101111, 0b00101100, 0b01101001,
+  0b00101010, 0b11101001, 0b00111100, 0b11000100, 0b00000111, 0b10010011, 0b11000101, 0b00000111,
+  0b00110111, 0b00011111, 0b01111011, 0b11010001, 0b10111010, 0b00000111, 0b10010000, 0b00110111,
+  0b11011111, 0b01011010, 0b11101101, 0b11001000, 0b10001100, 0b01101001, 0b10010111, 0b00101001,
+  0b10101100, 0b11011001, 0b11010110, 0b00011010, 0b11010110, 0b10101000, 0b00000101, 0b11010011,
+  0b01101010, 0b11001011, 0b11010110, 0b01010010, 0b00111111, 0b11100111, 0b10000010, 0b10000110,
+  0b01101110, 0b10011010, 0b01100101, 0b10100110, 0b00101110, 0b01010100, 0b11110100, 0b01111010,
+  0b11001011, 0b00101110, 0b01100011, 0b10111111, 0b01010100, 0b11000100, 0b11010100, 0b01010100
+};
 
 /**
  * @brief A utility array that is used for quickly determining 
@@ -174,8 +152,7 @@ void generate_interference_lookup() {
 }
 
 /**
- * @brief TODO test this!! I tried, but it wasn't working, which isn't
- * a good sign... A utility function for packaging bits into bytes and 
+ * @brief A utility function for packaging bits into bytes and 
  * writing them to an output channel. The bits are buffered in 'working'
  * and when there are enough of them they get written to 'output'
  * 
@@ -231,17 +208,17 @@ int chip_chunks_match(char *chip_chunks_1, char *chip_chunks_2, int num_chip_chu
  * @param output_bytes  the sequence of bytes to write two
  * @param num_bytes     the number of bytes of true data we want to parse out
  */
-void chip_chunks_to_bytes(char chip_chunks[], char output_bytes[], int num_bytes)  {
+void chip_chunks_to_bytes(char chip_chunks[], char *output_bytes, int num_bytes)  {
     int chip_chunk_index = 0;
     int working = 0;
 
     for (int bit_index = 0; bit_index < num_bytes * 8; bit_index++) {
         // this segment leverages the fact that each physical packet carries a single bit of data
         assert(BITS_PER_PHYSICAL_PACKET == 1);
-        if (chip_chunks_match(chip_chunks[chip_chunk_index], PRN0_CHIP_CHUNK, CHUNKS_OF_DATA_IN_PHYSICAL_PACKET)) {
+        if (chip_chunks_match(chip_chunks + chip_chunk_index, PRN0_CHIP_CHUNK, CHUNKS_OF_DATA_IN_PHYSICAL_PACKET)) {
             bit_funnel(0, &output_bytes, &working);
         }
-        else if (chip_chunks_match(chip_chunks[chip_chunk_index], PRN1_CHIP_CHUNK, CHUNKS_OF_DATA_IN_PHYSICAL_PACKET)) {
+        else if (chip_chunks_match(chip_chunks + chip_chunk_index, PRN1_CHIP_CHUNK, CHUNKS_OF_DATA_IN_PHYSICAL_PACKET)) {
             bit_funnel(1, &output_bytes, &working);
         }
         else {
@@ -276,13 +253,15 @@ unsigned char tcpip_buffer[SAMPLES_IN_TCP_BUFFER];
 
 // raw chip guesses from the 0 clock-synced buffer data
 int filtered_mod_0[CHIPS_IN_FILTER]; 
+
 // raw chip guesses from the 1 clock-synced buffer data
 int filtered_mod_1[CHIPS_IN_FILTER];
+
 // raw chip guesses from the 2 clock-synced buffer data
 int filtered_mod_2[CHIPS_IN_FILTER];
 
 // utility packaging of filtered arrays for iterating through later
-int **filtered_arrs = {filtered_mod_0, filtered_mod_1, filtered_mod_2};
+int *filtered_arrs[3] = {filtered_mod_0, filtered_mod_1, filtered_mod_2};
 
 // processed chunk array from the 0 clock-synced buffer data
 char received_test_0[CHUNKS_IN_RECEIVED];
@@ -292,7 +271,7 @@ char received_test_1[CHUNKS_IN_RECEIVED];
 char received_test_2[CHUNKS_IN_RECEIVED];
 
 // utility packaging of chunk-arrays for iterating through later
-char **received_test_arrs = {received_test_0, received_test_1, received_test_2};
+char *received_test_arrs[3] = {received_test_0, received_test_1, received_test_2};
 
 // Sync word (actually not a word anymore...) TODO replace with real sync word
 char address[BYTES_IN_SYNC_WORD] = {0xff,0x00, 0xff};
@@ -528,8 +507,6 @@ int main(void)
     // do good processing
     assert(CHUNKS_IN_RECEIVED * CHIPS_PER_CHUNK - CHIPS_IN_FILTER > CHIPS_PER_LOGICAL_PACKET);
     assert(CHUNKS_OF_DATA_IN_PHYSICAL_PACKET * CHIPS_PER_CHUNK / CHIPS_PER_BIT == BITS_PER_PHYSICAL_PACKET);
-    generate_chip_chunks(PRN0_STRING ,PRN0_CHIP_CHUNK);
-    generate_chip_chunks(PRN1_STRING, PRN1_CHIP_CHUNK);
     generate_interference_lookup();
 
     cpu_set_t cpuset;
