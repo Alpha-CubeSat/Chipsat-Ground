@@ -38,7 +38,18 @@
 #define CHIPS_PER_BIT 512
 
 // The number of integers in the packet to be transmitted.
-#define BYTES_PER_PACKET 10
+#define DATA_BYTES_IN_LOGICAL_PACKET 10
+
+// the number of bytes in our sync word (not really a word anymore)
+#define BYTES_IN_SYNC_WORD 3
+
+// the number of bytes in our logical packet
+#define BYTES_IN_LOGICAL_PACKET (BYTES_IN_SYNC_WORD + DATA_BYTES_IN_LOGICAL_PACKET)
+
+// the number of chips in a logical packet. This includes garbage chips that occur
+// between transmissions. Convert bytes to physical packets, and then physical packets
+// to chips. A direct conversion from bytes to chips would neglect the garbage chips
+#define CHIPS_PER_LOGICAL_PACKET (BYTES_IN_LOGICAL_PACKET * BITS_PER_BYTE / BITS_PER_PHYSICAL_PACKET * CHUNKS_IN_PHYSICAL_PACKET * CHIPS_PER_CHUNK)
 
 // An estimate of the percentage of bits that will not be flipped in transmission.
 #define ACCURACY_THRESHOLD 0.80
@@ -48,13 +59,7 @@
 
 // the number of chips in a chip-chunk. Currently 8 for char chunks, but could be
 // 16, 32 etc if we want to move to larger chunk containers.
-#define CHIPS_PER_CHIP_CHUNK 8
-
-// the number of bytes in our sync word (not really a word anymore)
-#define BYTES_IN_SYNC_WORD 3
-
-// the number of chips in the packet
-#define CHIPS_PER_PACKET (CHIPS_PER_BIT * BITS_PER_BYTE * BYTES_PER_PACKET)
+#define CHIPS_PER_CHUNK 8
 
 // these numbers come from our decimation/filtering approach. 
 // We consume 12 samples to output a single partial chip (in a single filter),
@@ -66,15 +71,28 @@
 #define PACKETS_PER_BUFFER 2
 
 // the number of samples to collect on each read from the socket
-#define SAMPLES_IN_TCP_BUFFER (SAMPLES_PER_CHIP * CHIPS_PER_PACKET * PACKETS_PER_BUFFER)
+#define SAMPLES_IN_TCP_BUFFER (SAMPLES_PER_CHIP * CHIPS_PER_LOGICAL_PACKET * PACKETS_PER_BUFFER)
 
 // the number of chips each filter must be able to hold
-#define CHIPS_IN_FILTER (CHIPS_PER_PACKET * PACKETS_PER_BUFFER + 1)
+#define CHIPS_IN_FILTER (CHIPS_PER_LOGICAL_PACKET * PACKETS_PER_BUFFER + 1)
 
 // the number of chunks in our received_arr.
 // note that whatever size we choose, it will be depleted by CHIPS_IN_FILTER
 // chips before the next refill.
-#define CHUNKS_IN_RECEIVED (CHIPS_IN_FILTER * 2 / CHIPS_PER_CHIP_CHUNK)
+#define CHUNKS_IN_RECEIVED (CHIPS_IN_FILTER * 2 / CHIPS_PER_CHUNK)
+
+// the number of data chunks in a physical packet from the transmitter
+#define CHUNKS_OF_DATA_IN_PHYSICAL_PACKET 64
+
+// the sending side includes some garbage in each packet that won't transmit properly. We need to
+// skip over that garbage
+#define CHUNKS_OF_JUNK_IN_PHYSICAL_PACKET 2
+
+// the number of chunks in a physical packet
+#define CHUNKS_IN_PHYSICAL_PACKET (CHUNKS_OF_DATA_IN_PHYSICAL_PACKET + CHUNKS_OF_JUNK_IN_PHYSICAL_PACKET)
+
+// the number of bits contained in each physical packet
+#define BITS_PER_PHYSICAL_PACKET 1
 
 /**
 Each bit is mapped to CHIPS_PER_BIT chips when being transmitted
@@ -137,21 +155,21 @@ void generate_chip_chunks(char prn[], char prn_chip_chunks[]) {
  * the number of set bits in a chunk. For example:
  * 5 = 0b101 goes to 2.
  */
-int INTERFERENCE_LOOKUP[1 << CHIPS_PER_CHIP_CHUNK];
+int INTERFERENCE_LOOKUP[1 << CHIPS_PER_CHUNK];
 
 /**
  * @brief Populates the INTERFERENCE_LOOKUP array above.
  */
 void generate_interference_lookup() {
-    int interference_lookup_length = 1 << CHIPS_PER_CHIP_CHUNK;
+    int interference_lookup_length = 1 << CHIPS_PER_CHUNK;
     for (int index = 0; index < interference_lookup_length; index++) {
         int num_copy = index; // copy so that we don't mutate the thing over which we iterate 
-        int set_bits_in_num = 0; // count of bits set in the 
+        int set_bits_in_num_count = 0; // count of bits set in the number. for 0b101 should be 2
         while (num_copy) {
             num_copy &= (num_copy - 1);
-            set_bits_in_num += 1;
+            set_bits_in_num_count += 1;
         }
-        INTERFERENCE_LOOKUP[index] = set_bits_in_num;
+        INTERFERENCE_LOOKUP[index] = set_bits_in_num_count;
     }
 }
 
@@ -201,7 +219,7 @@ int chip_chunks_match(char *chip_chunks_1, char *chip_chunks_2, int num_chip_chu
             char interference_pattern = ~ (chip_chunks_1[offset] ^ chip_chunks_2[offset]);
             common_chips += INTERFERENCE_LOOKUP[interference_pattern];
         }
-        int max_common = num_chip_chunks * CHIPS_PER_CHIP_CHUNK;
+        int max_common = num_chip_chunks * CHIPS_PER_CHUNK;
         return ((float) common_chips / max_common) > ACCURACY_THRESHOLD;
 }
 
@@ -211,30 +229,29 @@ int chip_chunks_match(char *chip_chunks_1, char *chip_chunks_2, int num_chip_chu
  * 
  * @param chip_chunks   the sequence of chip chunks to read from
  * @param output_bytes  the sequence of bytes to write two
- * @param num_bytes     the number of bytes we want to parse out
+ * @param num_bytes     the number of bytes of true data we want to parse out
  */
-void chip_chunks_to_bytes(char chip_chunks[], char output_bytes[], char num_bytes) {
-    // this division is a little scary, not sure what happens if there's a remainder
-    int num_chip_chunks = num_bytes * BITS_PER_BYTE * CHIPS_PER_BIT / CHIPS_PER_CHIP_CHUNK;
+void chip_chunks_to_bytes(char chip_chunks[], char output_bytes[], int num_bytes)  {
     int chip_chunk_index = 0;
-    int chip_chunks_per_bit = CHIPS_PER_BIT / CHIPS_PER_CHIP_CHUNK;
-
     int working = 0;
-    while (chip_chunk_index < num_chip_chunks) {
-        if (chip_chunks_match(chip_chunks[chip_chunk_index], PRN0_CHIP_CHUNK, chip_chunks_per_bit)) {
+
+    for (int bit_index = 0; bit_index < num_bytes * 8; bit_index++) {
+        // this segment leverages the fact that each physical packet carries a single bit of data
+        assert(BITS_PER_PHYSICAL_PACKET == 1);
+        if (chip_chunks_match(chip_chunks[chip_chunk_index], PRN0_CHIP_CHUNK, CHUNKS_OF_DATA_IN_PHYSICAL_PACKET)) {
             bit_funnel(0, &output_bytes, &working);
         }
-        else if (chip_chunks_match(chip_chunks[chip_chunk_index], PRN1_CHIP_CHUNK, chip_chunks_per_bit)) {
+        else if (chip_chunks_match(chip_chunks[chip_chunk_index], PRN1_CHIP_CHUNK, CHUNKS_OF_DATA_IN_PHYSICAL_PACKET)) {
             bit_funnel(1, &output_bytes, &working);
         }
         else {
             // TODO should probably log these and eventually chuck them rather than treating as a 0
             bit_funnel(0, &output_bytes, &working);
         }
-        chip_chunk_index += chip_chunks_per_bit;
+        // consume data + junk chips
+        chip_chunk_index += CHUNKS_OF_DATA_IN_PHYSICAL_PACKET + CHUNKS_OF_JUNK_IN_PHYSICAL_PACKET;
     }
 } 
-
 
 ////////////// END PRN SETUP /////////////////
 
@@ -284,7 +301,7 @@ char address[BYTES_IN_SYNC_WORD] = {0xff,0x00, 0xff};
 int counter = 0;
 
 // location for keeping received packets
-char packet[BYTES_PER_PACKET];
+char packet[DATA_BYTES_IN_LOGICAL_PACKET];
 
 // tracks how many times we've shifted the received_test_x arrays. Each shift
 // removes a chip. When we've removed enough chips, read more data from the socket
@@ -409,7 +426,7 @@ void * slice() {
         sem_wait(&slice_semaphore);
 
         // we're appending new data to the END of the buffered chip-chunks
-        int chunk_offset = CHUNKS_IN_RECEIVED - CHIPS_IN_FILTER / CHIPS_PER_CHIP_CHUNK;
+        int chunk_offset = CHUNKS_IN_RECEIVED - CHIPS_IN_FILTER / CHIPS_PER_CHUNK;
 
         int working = 0; 
         for (int filter_num = 0; filter_num < 3; filter_num++) {
@@ -422,6 +439,11 @@ void * slice() {
         }
 
         // you'll pop bitstrings over to FPGA here
+        // note that this is conservative. We may end up with a string of 00s in
+        // the middle of our buffer, and that's alright. A tighter implementation
+        // would be
+        // numclocks -= CHIPS_IN_FILTER
+        // but that gets complicated
         numclocks = 0;
         sem_post(&search_semaphore);
     }
@@ -437,6 +459,8 @@ void * search() {
         // performant implementation would be to shift the location at which we index into the
         // array. The words 'ring buffer' come to mind, but not sure that's right
 
+        int chunks_in_sync_word = CHUNKS_IN_PHYSICAL_PACKET / BITS_PER_PHYSICAL_PACKET * BITS_PER_BYTE * BYTES_IN_SYNC_WORD;
+
         // each clock tick consumes a chip. When we've consumed as many chips as the filter holds
         // we should load from the filter again.
         while (numclocks < CHIPS_IN_FILTER) {
@@ -445,7 +469,7 @@ void * search() {
                 char *received_test = received_test_arrs[mod_x];
                 chip_chunks_to_bytes(received_test, preamble, BYTES_IN_SYNC_WORD);
                 if (strcmp(preamble, address) == 0) {
-                    chip_chunks_to_bytes(received_test + BYTES_IN_SYNC_WORD, packet, BYTES_PER_PACKET);
+                    chip_chunks_to_bytes(received_test + chunks_in_sync_word, packet, DATA_BYTES_IN_LOGICAL_PACKET);
                     sem_post(&exfiltrate_semaphore);
                     sem_wait(&search_semaphore);
                 }
@@ -475,7 +499,7 @@ void * exfiltrate() {
         printf("%d: ", counter);
         fp = fopen("stored_data.txt", "a+");
         time(&now);
-        for (i=0; i<=BYTES_PER_PACKET; i++) {
+        for (i=0; i<=DATA_BYTES_IN_LOGICAL_PACKET; i++) {
             printf("%02x ", packet[i]);
             fprintf(fp, "%02x ", packet[i]);
         }
@@ -484,12 +508,12 @@ void * exfiltrate() {
         printf("\n");
 
         // fast forward clocks to consume chips included in packet
-        for (i=0; i<(BYTES_PER_PACKET*BITS_PER_BYTE); i++) {
+        for (i=0; i<CHIPS_PER_LOGICAL_PACKET; i++) {
             clock_array(received_test_0);
             clock_array(received_test_1);
             clock_array(received_test_2);
         }
-        numclocks += BYTES_PER_PACKET*BITS_PER_BYTE;
+        numclocks += CHIPS_PER_LOGICAL_PACKET;
 
         sem_post(&search_semaphore);
     }
@@ -502,7 +526,8 @@ int main(void)
     // since we're going to be refilling the received_arr from the filterarrs, we need
     // to be sure that even when we're most depleted, we have enough valid chips left to
     // do good processing
-    assert(CHUNKS_IN_RECEIVED * CHIPS_PER_CHIP_CHUNK > CHIPS_IN_FILTER + CHIPS_PER_PACKET);
+    assert(CHUNKS_IN_RECEIVED * CHIPS_PER_CHUNK - CHIPS_IN_FILTER > CHIPS_PER_LOGICAL_PACKET);
+    assert(CHUNKS_OF_DATA_IN_PHYSICAL_PACKET * CHIPS_PER_CHUNK / CHIPS_PER_BIT == BITS_PER_PHYSICAL_PACKET);
     generate_chip_chunks(PRN0_STRING ,PRN0_CHIP_CHUNK);
     generate_chip_chunks(PRN1_STRING, PRN1_CHIP_CHUNK);
     generate_interference_lookup();
