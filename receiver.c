@@ -46,8 +46,8 @@
 // The number of integers in the packet to be transmitted.
 #define DATA_BYTES_IN_LOGICAL_PACKET 10
 
-// the number of bytes in our sync word (not really a word anymore)
-#define BYTES_IN_SYNC_WORD 3
+// the number of bytes in our sync word
+#define BYTES_IN_SYNC_WORD 4
 
 // the number of bytes in our logical packet
 #define BYTES_IN_LOGICAL_PACKET (BYTES_IN_SYNC_WORD + DATA_BYTES_IN_LOGICAL_PACKET)
@@ -92,7 +92,7 @@
 
 // the sending side includes some garbage in each packet that won't transmit properly. We need to
 // skip over that garbage
-#define CHUNKS_OF_JUNK_IN_PHYSICAL_PACKET 2
+#define CHUNKS_OF_JUNK_IN_PHYSICAL_PACKET 12
 
 // the number of chunks in a physical packet
 #define CHUNKS_IN_PHYSICAL_PACKET (CHUNKS_OF_DATA_IN_PHYSICAL_PACKET + CHUNKS_OF_JUNK_IN_PHYSICAL_PACKET)
@@ -274,7 +274,7 @@ char received_test_2[CHUNKS_IN_RECEIVED];
 char *received_test_arrs[3] = {received_test_0, received_test_1, received_test_2};
 
 // Sync word (actually not a word anymore...) TODO replace with real sync word
-char address[BYTES_IN_SYNC_WORD] = {0xff,0x00, 0xff};
+char address[BYTES_IN_SYNC_WORD] = {0x07,0x07, 0x07, 0x07};
 
 // Count received packets
 int counter = 0;
