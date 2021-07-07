@@ -57,6 +57,7 @@
 // to chips. A direct conversion from bytes to chips would neglect the garbage chips
 #define CHIPS_PER_LOGICAL_PACKET (BYTES_IN_LOGICAL_PACKET * BITS_PER_BYTE / BITS_PER_PHYSICAL_PACKET * CHUNKS_IN_PHYSICAL_PACKET * CHIPS_PER_CHUNK)
 
+
 // An estimate of the percentage of bits that will not be flipped in transmission.
 #define ACCURACY_THRESHOLD 0.80
 
@@ -478,7 +479,7 @@ void * exfiltrate() {
         printf("%d: ", counter);
         fp = fopen("stored_data.txt", "a+");
         time(&now);
-        for (i=0; i<=DATA_BYTES_IN_LOGICAL_PACKET; i++) {
+        for (i=0; i<DATA_BYTES_IN_LOGICAL_PACKET; i++) {
             printf("%02x ", packet[i]);
             fprintf(fp, "%02x ", packet[i]);
         }
